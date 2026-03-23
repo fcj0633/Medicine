@@ -132,7 +132,7 @@ CREATE TABLE `medication_logs` (
 
 -- 7.1 创建演示用户
 -- 密码均为 123456，bcrypt 加密后的值
--- 可通过 python -c "from passlib.context import CryptContext; print(CryptContext(schemes=['bcrypt']).hash('123456'))" 生成
+-- 密码已使用bcrypt加密
 INSERT INTO `users` (`username`, `hashed_password`, `display_name`, `role`, `phone`) VALUES
 ('laowang',  '$2b$12$cnugdhzPegJ33Ra5fabRfuUYPn.6OAZ9kar5wH9pnr5eKhtiTreOq', '王大爷', 'elderly', '13800138001'),
 ('laozhang', '$2b$12$cnugdhzPegJ33Ra5fabRfuUYPn.6OAZ9kar5wH9pnr5eKhtiTreOq', '张奶奶', 'elderly', '13800138002'),

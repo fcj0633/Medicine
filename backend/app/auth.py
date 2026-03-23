@@ -1,33 +1,31 @@
 from datetime import datetime, timedelta
 from typing import Optional
 
-# bcrypt >= 4.1 移除了 __about__ 属性，passlib 尚未适配，需要打补丁
-import bcrypt as _bcrypt
-if not hasattr(_bcrypt, '__about__'):
-    class _About:
-        __version__ = getattr(_bcrypt, '__version__', '4.0.0')
-    _bcrypt.__about__ = _About()
-
+import bcrypt
 from fastapi import Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer
 from jose import JWTError, jwt
-from passlib.context import CryptContext
 from sqlalchemy.orm import Session
 
 from app.config import SECRET_KEY, ALGORITHM, ACCESS_TOKEN_EXPIRE_MINUTES
 from app.database import get_db
 from app.models import User
 
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/auth/login", auto_error=False)
 
 
 def hash_password(password: str) -> str:
-    return pwd_context.hash(password)
+    # 处理bcrypt 72字节限制
+    password = password[:72].encode('utf-8')
+    hashed = bcrypt.hashpw(password, bcrypt.gensalt())
+    return hashed.decode('utf-8')
 
 
 def verify_password(plain_password: str, hashed_password: str) -> bool:
-    return pwd_context.verify(plain_password, hashed_password)
+    # 处理bcrypt 72字节限制
+    plain_password = plain_password[:72].encode('utf-8')
+    hashed_password = hashed_password.encode('utf-8')
+    return bcrypt.checkpw(plain_password, hashed_password)
 
 
 def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -> str:
