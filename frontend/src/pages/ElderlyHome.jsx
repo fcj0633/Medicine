@@ -2,12 +2,13 @@ import { useState, useEffect, useRef } from 'react';
 import { Link } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext';
 import { reminderAPI } from '../api';
-import { Camera, Bell, CheckCircle, Clock, AlertTriangle, Volume2 } from 'lucide-react';
+import { Camera, Bell, CheckCircle, Clock, AlertTriangle, Volume2, X } from 'lucide-react';
 
 export default function ElderlyHome() {
   const { user } = useAuth();
   const [todayStatus, setTodayStatus] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [showConfirmModal, setShowConfirmModal] = useState(null);
   const audioRef = useRef(null);
 
   useEffect(() => {
@@ -28,6 +29,7 @@ export default function ElderlyHome() {
   const handleConfirm = async (reminderId) => {
     try {
       await reminderAPI.confirmMedication(reminderId);
+      setShowConfirmModal(null);
       loadTodayStatus();
     } catch (err) {
       alert('确认失败：' + (err.response?.data?.detail || '未知错误'));
@@ -194,12 +196,17 @@ export default function ElderlyHome() {
                   <div className="flex items-center justify-between gap-3">
                     <div>{getStatusBadge(item.status)}</div>
                     {item.status === 'pending' && (
-                      <button
-                        onClick={() => handleConfirm(item.reminder_id)}
-                        className="px-6 py-3 bg-green-600 text-white font-bold rounded-2xl text-lg shadow-lg active:scale-95 transition whitespace-nowrap"
-                      >
-                        ✅ 已服药
-                      </button>
+                      <div className="flex flex-col items-end gap-2">
+                        <span className="text-sm sm:text-base text-orange-700 font-medium">
+                          吃完后再点确认
+                        </span>
+                        <button
+                          onClick={() => setShowConfirmModal(item)}
+                          className="px-6 py-3 bg-orange-500 text-white font-bold rounded-2xl text-lg shadow-lg active:scale-95 transition whitespace-nowrap hover:bg-orange-600"
+                        >
+                          去确认服药
+                        </button>
+                      </div>
                     )}
                   </div>
                 </div>
@@ -208,6 +215,46 @@ export default function ElderlyHome() {
           )}
         </div>
       ) : null}
+
+      {showConfirmModal && (
+        <div className="fixed inset-0 bg-black/50 flex items-end sm:items-center justify-center z-50">
+          <div
+            className="bg-white rounded-t-3xl sm:rounded-3xl p-6 sm:p-8 w-full sm:max-w-md space-y-5"
+            style={{ paddingBottom: 'max(env(safe-area-inset-bottom, 16px), 24px)' }}
+          >
+            <div className="flex justify-between items-start">
+              <h2 className="text-xl sm:text-elder-xl font-bold text-gray-800">确认服药</h2>
+              <button onClick={() => setShowConfirmModal(null)} className="p-1 text-gray-400 hover:text-gray-600">
+                <X className="w-7 h-7" />
+              </button>
+            </div>
+            <div className="text-center space-y-2">
+              <div className="text-xl sm:text-elder-xl font-bold text-orange-600">{showConfirmModal.drug_name}</div>
+              <div className="text-lg sm:text-elder-lg text-gray-600">{showConfirmModal.reminder_time}</div>
+              <div className="text-base sm:text-elder-base text-gray-500">{showConfirmModal.dosage}</div>
+              {getMealText(showConfirmModal.meal_relation) && (
+                <div className="text-sm sm:text-base text-orange-700 font-medium">
+                  {getMealText(showConfirmModal.meal_relation)}服用
+                </div>
+              )}
+            </div>
+            <div className="grid grid-cols-2 gap-3">
+              <button
+                onClick={() => setShowConfirmModal(null)}
+                className="py-4 bg-gray-200 text-gray-700 font-bold rounded-2xl text-lg active:scale-95"
+              >
+                还没吃
+              </button>
+              <button
+                onClick={() => handleConfirm(showConfirmModal.reminder_id)}
+                className="py-4 bg-green-600 text-white font-bold rounded-2xl text-lg active:scale-95 shadow-lg hover:bg-green-700"
+              >
+                确认已服药
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

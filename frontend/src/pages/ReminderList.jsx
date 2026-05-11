@@ -233,10 +233,15 @@ export default function ReminderList() {
                   {/* 第三行：操作按钮 */}
                   <div className="flex gap-2 justify-end">
                     {isElderly && (
-                      <button onClick={() => setShowConfirmModal(reminder)}
-                        className="px-5 py-2.5 bg-green-600 text-white font-bold rounded-xl text-base active:scale-95 shadow">
-                        ✅ 已吃
-                      </button>
+                      <div className="flex flex-col items-end gap-2">
+                        <span className="text-sm text-orange-700 font-medium">吃完后再点确认</span>
+                        <button
+                          onClick={() => setShowConfirmModal(reminder)}
+                          className="px-5 py-2.5 bg-orange-500 text-white font-bold rounded-xl text-base active:scale-95 shadow hover:bg-orange-600"
+                        >
+                          去确认服药
+                        </button>
+                      </div>
                     )}
                     {!isElderly && (
                       <>
@@ -281,7 +286,7 @@ export default function ReminderList() {
               </button>
               <button onClick={() => handleConfirm(showConfirmModal.id)}
                 className="py-4 bg-green-600 text-white font-bold rounded-2xl text-lg active:scale-95 shadow-lg">
-                ✅ 已吃了
+                确认已服药
               </button>
             </div>
           </div>

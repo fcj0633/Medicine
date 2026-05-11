@@ -63,6 +63,10 @@ body {
   @apply btn-elder bg-green-600 text-white hover:bg-green-700;
 }
 
+.btn-elder-warning {
+  @apply btn-elder bg-orange-500 text-white hover:bg-orange-600;
+}
+
 .btn-elder-danger {
   @apply btn-elder bg-red-600 text-white hover:bg-red-700;
 }
