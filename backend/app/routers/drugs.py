@@ -10,7 +10,13 @@ from app.models import User, Drug, FamilyRelation, Reminder, MedicationLog
 from app.schemas import DrugCreate, DrugUpdate, DrugOut, OCRResult
 from app.auth import get_current_user
 from app.config import UPLOAD_DIR
-from app.services.ocr_service import perform_ocr, extract_drug_info
+from app.services.ocr_service import (
+    OCRInputError,
+    OCRNoTextError,
+    OCRServiceError,
+    perform_ocr,
+    extract_drug_info,
+)
 from app.services.semantic_service import simplify_efficacy, simplify_usage, simplify_caution
 from app.services.tts_service import generate_drug_audio
 
@@ -30,28 +36,29 @@ def check_family_access(db: Session, current_user: User, target_user_id: int) ->
     return False
 
 
+def _run_ocr(contents: bytes) -> dict:
+    try:
+        return perform_ocr(contents)
+    except OCRInputError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except OCRNoTextError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except OCRServiceError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+
 @router.post("/recognize", response_model=OCRResult)
 async def recognize_drug(
     file: UploadFile = File(...),
-    db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
     """上传药品图片进行 OCR 识别"""
     contents = await file.read()
 
-    # 保存图片
-    ext = os.path.splitext(file.filename)[1] if file.filename else ".jpg"
-    img_name = f"{uuid.uuid4().hex}{ext}"
-    img_path = os.path.join(UPLOAD_DIR, img_name)
-    with open(img_path, "wb") as f:
-        f.write(contents)
-
     # OCR 识别（CPU 密集型，放到线程池避免阻塞事件循环）
-    loop = asyncio.get_event_loop()
-    try:
-        raw_text = await loop.run_in_executor(None, perform_ocr, contents)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"OCR识别失败：{str(e)}")
+    loop = asyncio.get_running_loop()
+    ocr_result = await loop.run_in_executor(None, _run_ocr, contents)
+    raw_text = ocr_result["raw_text"]
 
     # 结构化提取
     info = extract_drug_info(raw_text)
@@ -72,6 +79,10 @@ async def recognize_drug(
         frequency=info.get("frequency"),
         caution=info.get("caution"),
         caution_simple=caution_simple,
+        ocr_provider=ocr_result.get("provider"),
+        low_confidence=bool(ocr_result.get("low_confidence")),
+        confidence_notice=ocr_result.get("confidence_notice"),
+        ocr_meta=ocr_result.get("meta"),
     )
 
 
@@ -97,11 +108,17 @@ async def upload_and_save_drug(
         f.write(contents)
 
     # OCR（线程池执行）
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     try:
-        raw_text = await loop.run_in_executor(None, perform_ocr, contents)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"OCR识别失败：{str(e)}")
+        ocr_result = await loop.run_in_executor(None, _run_ocr, contents)
+    except HTTPException:
+        if os.path.exists(img_path):
+            try:
+                os.remove(img_path)
+            except OSError:
+                pass
+        raise
+    raw_text = ocr_result["raw_text"]
     info = extract_drug_info(raw_text)
 
     drug = Drug(
@@ -226,6 +243,8 @@ def get_drug_audio(drug_id: int, db: Session = Depends(get_db),
     drug = db.query(Drug).filter(Drug.id == drug_id).first()
     if not drug:
         raise HTTPException(status_code=404, detail="药品不存在")
+    if not check_family_access(db, current_user, drug.user_id):
+        raise HTTPException(status_code=403, detail="无权查看")
 
     filename = generate_drug_audio(
         drug.name,

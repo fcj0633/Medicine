@@ -1,5 +1,5 @@
 from pydantic import BaseModel
-from typing import Optional, List
+from typing import Optional, List, Dict, Any
 from datetime import datetime
 
 
@@ -166,6 +166,10 @@ class OCRResult(BaseModel):
     frequency: Optional[str] = None
     caution: Optional[str] = None
     caution_simple: Optional[str] = None
+    ocr_provider: Optional[str] = None
+    low_confidence: bool = False
+    confidence_notice: Optional[str] = None
+    ocr_meta: Optional[Dict[str, Any]] = None
 
 
 # ========== Auto Reminder ==========

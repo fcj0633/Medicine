@@ -1,19 +1,40 @@
-import os
+import base64
+import io
+import json
+import logging
+import socket
+import threading
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
 import cv2
 import numpy as np
-from PIL import Image
-import io
+from PIL import Image, UnidentifiedImageError
 import re
 from typing import Optional
 from pathlib import Path
 
+from app.config import BAIDU_OCR_API_KEY, BAIDU_OCR_SECRET_KEY, BAIDU_OCR_TIMEOUT, OCR_PROVIDER
+
+logger = logging.getLogger(__name__)
+
 # Lazy-load OCR engines to avoid slow startup
 _easyocr_reader = None
 _rapidocr_reader = None
+_baidu_token_cache = {"access_token": None, "expires_at": 0.0}
+_baidu_token_lock = threading.Lock()
 
 # EasyOCR 模型目录
 MODEL_DIR = Path.home() / ".EasyOCR" / "model"
 REQUIRED_MODELS = ["craft_mlt_25k.pth", "chinese_sim_g2.pth"]
+
+BAIDU_TOKEN_URL = "https://aip.baidubce.com/oauth/2.0/token"
+BAIDU_GENERAL_BASIC_URL = "https://aip.baidubce.com/rest/2.0/ocr/v1/general_basic"
+BAIDU_MAX_IMAGE_SIZE = 8 * 1024 * 1024
+BAIDU_MIN_SIDE = 15
+BAIDU_MAX_SIDE = 4096
+BAIDU_LOW_CONFIDENCE_THRESHOLD = 0.75
 
 # 药品名称识别辅助词
 NAME_SUFFIXES = ["片", "胶囊", "颗粒", "口服液", "滴眼液", "注射液", "软膏", "丸", "膏", "栓", "散", "冲剂", "糖浆", "胶丸", "口服溶液"]
@@ -23,6 +44,54 @@ CHINESE_REGEX = re.compile(r"[\u4e00-\u9fff]")
 ENGLISH_GENERIC_MAP = {
     "IBUPROFEN": "布洛芬",
 }
+SECTION_STOP_HEADERS = [
+    "药品名称",
+    "通用名称",
+    "商品名称",
+    "成份",
+    "成分",
+    "性状",
+    "功能主治",
+    "作用类别",
+    "功能与主治",
+    "适应症",
+    "功效",
+    "规格",
+    "用法用量",
+    "用法与用量",
+    "用法和用量",
+    "用法",
+    "不良反应",
+    "禁忌",
+    "注意事项",
+    "药物相互作用",
+    "贮藏",
+    "藏",
+    "包装",
+    "有效期",
+    "执行标准",
+    "批准文号",
+    "说明书修订日期",
+    "生产企业",
+]
+
+
+class OCRInputError(ValueError):
+    """上传图片格式、尺寸等不满足 OCR 约束。"""
+
+
+class OCRNoTextError(RuntimeError):
+    """OCR 成功但未识别到任何文字。"""
+
+
+class OCRServiceError(RuntimeError):
+    """外部 OCR 服务不可用或返回异常。"""
+
+    def __init__(self, message: str, *, retryable: bool = False, status_code: int = 502, error_code: Optional[int] = None):
+        super().__init__(message)
+        self.retryable = retryable
+        self.status_code = status_code
+        self.error_code = error_code
 
 
 def check_ocr_models() -> list:
@@ -62,6 +131,118 @@ def get_rapidocr_reader():
         else:
             _rapidocr_reader = RapidOCR()
     return _rapidocr_reader
+
+
+def _validate_provider(provider: str) -> str:
+    provider = (provider or "hybrid").strip().lower()
+    if provider not in {"baidu", "easyocr", "hybrid"}:
+        return "hybrid"
+    return provider
+
+
+def _post_form(url: str, data: dict, timeout: float) -> dict:
+    payload = urllib.parse.urlencode(data).encode("utf-8")
+    request = urllib.request.Request(
+        url,
+        data=payload,
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            return json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode("utf-8", errors="ignore")
+        try:
+            return json.loads(body)
+        except json.JSONDecodeError as json_exc:
+            raise OCRServiceError("百度 OCR 服务响应异常，请稍后重试", retryable=True, status_code=502) from json_exc
+    except urllib.error.URLError as exc:
+        raise OCRServiceError("百度 OCR 服务连接失败，请稍后重试", retryable=True, status_code=502) from exc
+    except (TimeoutError, socket.timeout) as exc:
+        raise OCRServiceError("百度 OCR 服务超时，请稍后重试", retryable=True, status_code=502) from exc
+
+
+def get_baidu_access_token(force_refresh: bool = False) -> str:
+    if not BAIDU_OCR_API_KEY or not BAIDU_OCR_SECRET_KEY:
+        raise OCRServiceError("百度 OCR 凭证未配置", retryable=True, status_code=500)
+
+    now = time.time()
+    with _baidu_token_lock:
+        cached_token = _baidu_token_cache.get("access_token")
+        expires_at = float(_baidu_token_cache.get("expires_at") or 0.0)
+        if not force_refresh and cached_token and expires_at - 300 > now:
+            return cached_token
+
+        response = _post_form(
+            BAIDU_TOKEN_URL,
+            {
+                "grant_type": "client_credentials",
+                "client_id": BAIDU_OCR_API_KEY,
+                "client_secret": BAIDU_OCR_SECRET_KEY,
+            },
+            BAIDU_OCR_TIMEOUT,
+        )
+
+        access_token = response.get("access_token")
+        expires_in = int(response.get("expires_in") or 0)
+        if access_token and expires_in > 0:
+            _baidu_token_cache["access_token"] = access_token
+            _baidu_token_cache["expires_at"] = now + expires_in
+            return access_token
+
+        error_message = response.get("error_description") or response.get("error_msg") or response.get("error") or "获取 access_token 失败"
+        raise OCRServiceError(f"百度 OCR 鉴权失败：{error_message}", retryable=True, status_code=502)
+
+
+def normalize_image_for_baidu(image_bytes: bytes) -> bytes:
+    try:
+        image = Image.open(io.BytesIO(image_bytes))
+        image.load()
+    except (UnidentifiedImageError, OSError) as exc:
+        raise OCRInputError("图片格式不支持，请上传清晰的 jpg、png 或 bmp 图片") from exc
+
+    width, height = image.size
+    if min(width, height) < BAIDU_MIN_SIDE:
+        raise OCRInputError("图片尺寸过小，请上传更清晰的药盒或说明书图片")
+
+    if max(width, height) > BAIDU_MAX_SIDE:
+        scale = BAIDU_MAX_SIDE / float(max(width, height))
+        resized = (
+            max(BAIDU_MIN_SIDE, int(width * scale)),
+            max(BAIDU_MIN_SIDE, int(height * scale)),
+        )
+        image = image.resize(resized, Image.Resampling.LANCZOS)
+
+    if image.mode not in ("RGB", "L"):
+        background = Image.new("RGB", image.size, (255, 255, 255))
+        if "A" in image.getbands():
+            background.paste(image, mask=image.getchannel("A"))
+        else:
+            background.paste(image)
+        image = background
+    elif image.mode == "L":
+        image = image.convert("RGB")
+
+    current_image = image
+    for _ in range(4):
+        for quality in (90, 80, 70, 60, 50):
+            buffer = io.BytesIO()
+            current_image.save(buffer, format="JPEG", quality=quality, optimize=True)
+            normalized = buffer.getvalue()
+            encoded = urllib.parse.quote_plus(base64.b64encode(normalized).decode("ascii"))
+            if len(encoded) <= BAIDU_MAX_IMAGE_SIZE:
+                return normalized
+
+        resized = (
+            max(BAIDU_MIN_SIDE, int(current_image.width * 0.85)),
+            max(BAIDU_MIN_SIDE, int(current_image.height * 0.85)),
+        )
+        if resized == current_image.size:
+            break
+        current_image = current_image.resize(resized, Image.Resampling.LANCZOS)
+
+    raise OCRInputError("图片文件过大，请重新拍摄或压缩后再试")
 
 
 def preprocess_image(image_bytes: bytes) -> np.ndarray:
@@ -119,12 +300,32 @@ def get_title_crops(img: np.ndarray) -> list:
     return crops
 
 
-def perform_ocr(image_bytes: bytes) -> str:
-    """执行 OCR 识别，返回识别的原始文本"""
+def _merge_collected_lines(collected: list) -> tuple[list[str], list[dict]]:
+    collected.sort(key=lambda r: (r["y"], -r["conf"]))
+
+    seen = set()
+    merged_lines = []
+    line_confidences = []
+    for item in collected:
+        normalized = re.sub(r"\s+", "", item["text"])
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        merged_lines.append(item["text"])
+        line_confidences.append({
+            "text": item["text"],
+            "average": round(float(item["conf"]), 4),
+            "min": round(float(item["conf"]), 4),
+        })
+    return merged_lines, line_confidences
+
+
+def perform_ocr_easyocr(image_bytes: bytes) -> dict:
+    """执行本地 OCR 识别，返回统一结构。"""
     nparr = np.frombuffer(image_bytes, np.uint8)
     original = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
     if original is None:
-        raise ValueError("无法解析上传的图片")
+        raise OCRInputError("图片格式不支持，请上传清晰的 jpg、png 或 bmp 图片")
 
     processed = preprocess_image(image_bytes)
     processed_bgr = cv2.cvtColor(processed, cv2.COLOR_GRAY2BGR)
@@ -188,23 +389,156 @@ def perform_ocr(image_bytes: bytes) -> str:
                 add_result(text, score, box)
 
     if not collected:
-        return ""
+        raise OCRNoTextError("未识别到文字，请重新拍摄更清晰的药盒或说明书")
 
-    # 按 y 坐标排序，再按置信度
-    collected.sort(key=lambda r: (r["y"], -r["conf"]))
+    merged_lines, line_confidences = _merge_collected_lines(collected)
+    return {
+        "raw_text": "\n".join(merged_lines),
+        "provider": "easyocr",
+        "low_confidence": False,
+        "confidence_notice": None,
+        "meta": {
+            "line_probabilities": line_confidences,
+        },
+    }
 
-    seen = set()
-    merged_lines = []
-    for item in collected:
-        normalized = re.sub(r"\s+", "", item["text"])
-        if not normalized:
+
+def parse_baidu_ocr_response(response: dict) -> dict:
+    error_code = response.get("error_code")
+    if error_code:
+        error_message = response.get("error_msg") or "百度 OCR 服务异常"
+        retryable = int(error_code) in {17, 18, 19, 110, 111}
+        raise OCRServiceError(
+            f"百度 OCR 服务异常：{error_message}",
+            retryable=retryable,
+            status_code=502,
+            error_code=int(error_code),
+        )
+
+    words_result = response.get("words_result") or []
+    lines = []
+    line_probabilities = []
+    for item in words_result:
+        text = (item.get("words") or "").strip()
+        if not text:
             continue
-        if normalized in seen:
-            continue
-        seen.add(normalized)
-        merged_lines.append(item["text"])
+        lines.append(text)
+        probability = item.get("probability") or {}
+        average = probability.get("average")
+        minimum = probability.get("min")
+        line_probabilities.append({
+            "text": text,
+            "average": round(float(average), 4) if average is not None else None,
+            "min": round(float(minimum), 4) if minimum is not None else None,
+        })
 
-    return "\n".join(merged_lines)
+    if not lines:
+        raise OCRNoTextError("未识别到文字，请重新拍摄更清晰的药盒或说明书")
+
+    low_confidence = any(
+        line.get("average") is not None and line["average"] < BAIDU_LOW_CONFIDENCE_THRESHOLD
+        for line in line_probabilities
+    )
+
+    return {
+        "raw_text": "\n".join(lines),
+        "provider": "baidu",
+        "low_confidence": low_confidence,
+        "confidence_notice": "识别结果可能不准确，请手动核对" if low_confidence else None,
+        "meta": {
+            "log_id": response.get("log_id"),
+            "direction": response.get("direction"),
+            "words_result_num": response.get("words_result_num"),
+            "line_probabilities": line_probabilities,
+        },
+    }
+
+
+def perform_ocr_baidu(image_bytes: bytes) -> dict:
+    normalized_image = normalize_image_for_baidu(image_bytes)
+    encoded_image = base64.b64encode(normalized_image).decode("ascii")
+
+    def request_ocr(access_token: str) -> dict:
+        request_url = f"{BAIDU_GENERAL_BASIC_URL}?access_token={urllib.parse.quote_plus(access_token)}"
+        return _post_form(
+            request_url,
+            {
+                "image": encoded_image,
+                "language_type": "CHN_ENG",
+                "detect_direction": "true",
+                "paragraph": "true",
+                "probability": "true",
+            },
+            BAIDU_OCR_TIMEOUT,
+        )
+
+    started_at = time.perf_counter()
+    access_token = get_baidu_access_token()
+    response = request_ocr(access_token)
+
+    try:
+        parsed = parse_baidu_ocr_response(response)
+    except OCRServiceError as exc:
+        if exc.error_code not in {110, 111}:
+            raise
+        access_token = get_baidu_access_token(force_refresh=True)
+        response = request_ocr(access_token)
+        parsed = parse_baidu_ocr_response(response)
+
+    elapsed_ms = round((time.perf_counter() - started_at) * 1000, 2)
+    logger.info(
+        "OCR completed provider=%s latency_ms=%s log_id=%s",
+        parsed["provider"],
+        elapsed_ms,
+        parsed["meta"].get("log_id"),
+    )
+    return parsed
+
+
+def perform_ocr(image_bytes: bytes) -> dict:
+    """执行 OCR 识别并返回统一结构。"""
+    provider = _validate_provider(OCR_PROVIDER)
+    if provider == "easyocr":
+        return perform_ocr_easyocr(image_bytes)
+    if provider == "baidu":
+        return perform_ocr_baidu(image_bytes)
+
+    try:
+        return perform_ocr_baidu(image_bytes)
+    except OCRServiceError as exc:
+        if not exc.retryable:
+            raise
+        logger.warning("Baidu OCR unavailable, falling back to EasyOCR: %s", exc)
+        fallback = perform_ocr_easyocr(image_bytes)
+        fallback_meta = fallback.setdefault("meta", {})
+        fallback_meta["fallback_from"] = "baidu"
+        fallback_meta["fallback_reason"] = str(exc)
+        return fallback
+
+
+def _section_header_pattern(headers: list[str]) -> str:
+    escaped = [re.escape(h) for h in headers]
+    return r"(?:【|\[)?\s*(?:" + "|".join(escaped) + r")\s*(?:】|\])?\s*[：:]?\s*"
+
+
+def _extract_section(raw_text: str, headers: list[str], stop_headers: Optional[list[str]] = None) -> Optional[str]:
+    stop_headers = stop_headers or SECTION_STOP_HEADERS
+    header_pattern = _section_header_pattern(headers)
+    stop_pattern = _section_header_pattern(stop_headers)
+    pattern = re.compile(
+        rf"{header_pattern}(.*?)(?=(?:\n\s*)?{stop_pattern}|$)",
+        re.DOTALL,
+    )
+    match = pattern.search(raw_text)
+    if not match:
+        return None
+
+    section = match.group(1)
+    section = re.sub(r"\n(?=\d+[.、])", "\n", section)
+    section = re.sub(r"[ \t]+", "", section)
+    section = re.sub(r"\n{2,}", "\n", section)
+    section = section.strip("：: \n\t")
+    return section or None
 
 
 def extract_drug_info(raw_text: str) -> dict:
@@ -219,6 +553,7 @@ def extract_drug_info(raw_text: str) -> dict:
     }
 
     text = raw_text.replace(" ", "")
+    compact_text = re.sub(r"[ \t]+", "", raw_text)
     lines = [l.strip() for l in raw_text.split("\n") if l.strip()]
     upper_text = raw_text.upper()
 
@@ -297,60 +632,95 @@ def extract_drug_info(raw_text: str) -> dict:
                     break
 
     # 规格
+    info["specification"] = _extract_section(raw_text, ["规格", "规　格"], ["用法用量", "用法与用量", "用法和用量", "用法", "不良反应", "禁忌", "注意事项"])
+
     spec_patterns = [
-        r"(?:规格|规　格)[：:]\s*(.+?)(?:\n|$)",
+        r"(?:规格|规　格)[：:]?\s*(.+?)(?:\n|$)",
+        r"(每(?:片|粒|袋|支|瓶)装\d+(?:\.\d+)?(?:mg|g|ml|克|毫升))",
         r"(\d+(?:\.\d+)?(?:mg|g|ml|片|粒|袋|支)(?:/(?:片|粒|袋|支|瓶))?)",
     ]
     for p in spec_patterns:
-        m = re.search(p, text)
+        if info["specification"]:
+            break
+        m = re.search(p, compact_text)
         if m:
             info["specification"] = m.group(1).strip()
             break
 
     # 功效 / 适应症
-    efficacy_patterns = [
-        r"(?:功能主治|适应症|功效)[：:]\s*(.+?)(?:(?:用法|用量|注意|不良|禁忌|规格|贮藏|包装|批准)|$)",
-        r"(?:作用类别|功能与主治)[：:]\s*(.+?)(?:(?:用法|用量|注意|不良|禁忌)|$)",
-    ]
-    for p in efficacy_patterns:
-        m = re.search(p, text, re.DOTALL)
-        if m:
-            info["efficacy"] = m.group(1).strip().replace("\n", "")
-            break
+    info["efficacy"] = _extract_section(
+        raw_text,
+        ["功能主治", "适应症", "功效", "作用类别", "功能与主治"],
+        ["规格", "用法用量", "用法与用量", "用法和用量", "用法", "不良反应", "禁忌", "注意事项", "药物相互作用", "贮藏", "包装"],
+    )
+    if not info["efficacy"]:
+        efficacy_patterns = [
+            r"(?:功能主治|适应症|功效)[：:]?\s*(.+?)(?:(?:用法|用量|注意|不良|禁忌|规格|贮藏|包装|批准)|$)",
+            r"(?:作用类别|功能与主治)[：:]?\s*(.+?)(?:(?:用法|用量|注意|不良|禁忌)|$)",
+        ]
+        for p in efficacy_patterns:
+            m = re.search(p, compact_text, re.DOTALL)
+            if m:
+                info["efficacy"] = m.group(1).strip().replace("\n", "")
+                break
 
     # 用法用量
-    usage_patterns = [
-        r"(?:用法用量|用法与用量|用法和用量)[：:]\s*(.+?)(?:(?:注意|不良|禁忌|贮藏|包装|有效|批准|功能|适应)|$)",
-        r"(?:用法)[：:]\s*(.+?)(?:\n|$)",
-    ]
-    for p in usage_patterns:
-        m = re.search(p, text, re.DOTALL)
-        if m:
-            usage_text = m.group(1).strip().replace("\n", "")
-            info["usage_dosage"] = usage_text
-            break
+    info["usage_dosage"] = _extract_section(
+        raw_text,
+        ["用法用量", "用法与用量", "用法和用量", "用法"],
+        ["不良反应", "禁忌", "注意事项", "药物相互作用", "贮藏", "包装", "有效期", "批准文号"],
+    )
+    if not info["usage_dosage"]:
+        usage_patterns = [
+            r"(?:用法用量|用法与用量|用法和用量)[：:]?\s*(.+?)(?:(?:注意|不良|禁忌|贮藏|包装|有效|批准|功能|适应)|$)",
+            r"(?:用法)[：:]?\s*(.+?)(?:\n|$)",
+        ]
+        for p in usage_patterns:
+            m = re.search(p, compact_text, re.DOTALL)
+            if m:
+                usage_text = m.group(1).strip().replace("\n", "")
+                info["usage_dosage"] = usage_text
+                break
 
     # 频率提取
+    frequency_source = info["usage_dosage"] or compact_text
     freq_patterns = [
         r"(?:一日|每日|每天)\s*(\d+)\s*次",
         r"(\d+)\s*次\s*/\s*(?:日|天)",
         r"(?:每|一)\s*(\d+)\s*小时",
     ]
     for p in freq_patterns:
-        m = re.search(p, text)
+        m = re.search(p, frequency_source)
         if m:
             info["frequency"] = m.group(0)
             break
 
     # 注意事项
-    caution_patterns = [
-        r"(?:注意事项|禁忌)[：:]\s*(.+?)(?:(?:贮藏|包装|有效|批准|生产)|$)",
-        r"(?:不良反应)[：:]\s*(.+?)(?:(?:注意|禁忌|贮藏|包装)|$)",
-    ]
-    for p in caution_patterns:
-        m = re.search(p, text, re.DOTALL)
-        if m:
-            info["caution"] = m.group(1).strip().replace("\n", "")
-            break
+    info["caution"] = _extract_section(
+        raw_text,
+        ["注意事项"],
+        ["药物相互作用", "贮藏", "包装", "有效期", "执行标准", "批准文号", "说明书修订日期", "生产企业"],
+    )
+    if not info["caution"]:
+        for caution_header in (["禁忌"], ["不良反应"]):
+            caution_text = _extract_section(
+                raw_text,
+                caution_header,
+                ["注意事项", "药物相互作用", "贮藏", "包装", "有效期", "执行标准", "批准文号", "说明书修订日期", "生产企业"],
+            )
+            if caution_text:
+                info["caution"] = caution_text
+                break
+
+    if not info["caution"]:
+        caution_patterns = [
+            r"(?:注意事项|禁忌)[：:]?\s*(.+?)(?:(?:贮藏|包装|有效|批准|生产)|$)",
+            r"(?:不良反应)[：:]?\s*(.+?)(?:(?:注意|禁忌|贮藏|包装)|$)",
+        ]
+        for p in caution_patterns:
+            m = re.search(p, compact_text, re.DOTALL)
+            if m:
+                info["caution"] = m.group(1).strip().replace("\n", "")
+                break
 
     return info

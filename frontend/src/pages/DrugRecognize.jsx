@@ -1,14 +1,13 @@
-import { useState, useRef } from 'react';
+import { useEffect, useState, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext';
 import { drugAPI, reminderAPI, familyAPI } from '../api';
-import { Camera, Upload, Volume2, Save, Wand2, Loader2, Bell } from 'lucide-react';
+import { Camera, Volume2, Save, Wand2, Loader2, Bell, AlertTriangle } from 'lucide-react';
 
 export default function DrugRecognize() {
   const { user } = useAuth();
   const navigate = useNavigate();
   const fileInputRef = useRef(null);
-  const audioRef = useRef(null);
   const isElderly = user?.role === 'elderly';
 
   const [preview, setPreview] = useState(null);
@@ -22,14 +21,29 @@ export default function DrugRecognize() {
   const [targetUserId, setTargetUserId] = useState(null);
 
   // 家属选择目标老人
-  useState(() => {
+  useEffect(() => {
     if (user?.role === 'family') {
       familyAPI.getMyElderly().then(res => {
         setElderlyList(res.data);
         if (res.data.length > 0) setTargetUserId(res.data[0].id);
       }).catch(() => {});
     }
-  }, []);
+  }, [user?.role]);
+
+  const getRecognizeErrorMessage = (err) => {
+    const status = err.response?.status;
+    const detail = err.response?.data?.detail;
+    if (status === 400) {
+      return detail || '图片尺寸或格式不合法，请上传清晰的 jpg、png 或 bmp 图片';
+    }
+    if (status === 422) {
+      return detail || '未识别到文字，请重新拍摄更清晰的药盒或说明书';
+    }
+    if (status >= 500) {
+      return detail || '百度 OCR 服务异常，请稍后重试';
+    }
+    return detail || '请重试';
+  };
 
   const handleFileSelect = (e) => {
     const f = e.target.files?.[0];
@@ -48,28 +62,17 @@ export default function DrugRecognize() {
       const res = await drugAPI.recognize(file);
       setResult(res.data);
     } catch (err) {
-      alert('识别失败：' + (err.response?.data?.detail || '请重试'));
+      alert('识别失败：' + getRecognizeErrorMessage(err));
     } finally {
       setRecognizing(false);
     }
   };
 
   const handleSave = async () => {
-    if (!result) return;
+    if (!result || !file) return;
     setSaving(true);
     try {
-      const res = await drugAPI.create({
-        name: result.drug_name || '未识别药品',
-        specification: result.specification,
-        efficacy: result.efficacy,
-        efficacy_simple: result.efficacy_simple,
-        usage_dosage: result.usage_dosage,
-        usage_simple: result.usage_simple,
-        frequency: result.frequency,
-        caution: result.caution,
-        caution_simple: result.caution_simple,
-        target_user_id: targetUserId,
-      });
+      const res = await drugAPI.uploadAndSave(file, targetUserId);
       setSavedDrug(res.data);
 
       // 自动生成提醒建议
@@ -106,8 +109,6 @@ export default function DrugRecognize() {
 
   return (
     <div className="space-y-4 sm:space-y-6 max-w-2xl mx-auto">
-      <audio ref={audioRef} className="hidden" />
-
       <div>
         <h1 className={`${isElderly ? 'text-2xl sm:text-elder-2xl' : 'text-xl sm:text-2xl'} font-bold text-gray-800`}>
           拍照识药
@@ -190,6 +191,20 @@ export default function DrugRecognize() {
           <h2 className={`${isElderly ? 'text-elder-xl' : 'text-xl'} font-bold text-gray-800`}>
             🔍 识别结果
           </h2>
+
+          {result.low_confidence && (
+            <div className="card-elder border-yellow-200 bg-yellow-50/80">
+              <div className="flex items-start gap-3">
+                <AlertTriangle className="w-6 h-6 text-yellow-600 flex-shrink-0 mt-0.5" />
+                <div>
+                  <div className="font-bold text-yellow-800">识别结果需要人工核对</div>
+                  <p className="text-yellow-700 mt-1">
+                    {result.confidence_notice || '识别结果可能不准确，请手动核对'}
+                  </p>
+                </div>
+              </div>
+            </div>
+          )}
 
           {/* 药品名称 */}
           <div className="card-elder border-orange-200">
