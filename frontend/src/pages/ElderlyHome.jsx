@@ -1,8 +1,25 @@
-import { useState, useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext';
 import { reminderAPI } from '../api';
-import { Camera, Bell, CheckCircle, Clock, AlertTriangle, Volume2, X } from 'lucide-react';
+import {
+  AlertTriangle,
+  Bell,
+  Camera,
+  CheckCircle,
+  Clock,
+  Volume2,
+  X,
+} from 'lucide-react';
+
+const MEAL_TEXT_MAP = {
+  before_meal: '饭前',
+  after_meal: '饭后',
+  empty_stomach: '空腹',
+  before_sleep: '睡前',
+};
+
+const getMealText = (mealRelation) => MEAL_TEXT_MAP[mealRelation] || '';
 
 export default function ElderlyHome() {
   const { user } = useAuth();
@@ -19,8 +36,8 @@ export default function ElderlyHome() {
     try {
       const res = await reminderAPI.getTodayStatus();
       setTodayStatus(res.data);
-    } catch (err) {
-      console.error('加载今日状态失败', err);
+    } catch (error) {
+      console.error('加载今日状态失败:', error);
     } finally {
       setLoading(false);
     }
@@ -31,17 +48,17 @@ export default function ElderlyHome() {
       await reminderAPI.confirmMedication(reminderId);
       setShowConfirmModal(null);
       loadTodayStatus();
-    } catch (err) {
-      alert('确认失败：' + (err.response?.data?.detail || '未知错误'));
+    } catch (error) {
+      alert(`确认失败：${error.response?.data?.detail || '未知错误'}`);
     }
   };
 
   const speakWithBrowser = (text) => {
     if ('speechSynthesis' in window) {
-      const u = new SpeechSynthesisUtterance(text);
-      u.lang = 'zh-CN';
-      u.rate = 0.8;
-      speechSynthesis.speak(u);
+      const utterance = new SpeechSynthesisUtterance(text);
+      utterance.lang = 'zh-CN';
+      utterance.rate = 0.8;
+      speechSynthesis.speak(utterance);
     }
   };
 
@@ -51,39 +68,58 @@ export default function ElderlyHome() {
       if (res.data.url && audioRef.current) {
         audioRef.current.src = res.data.url;
         audioRef.current.onerror = () => {
-          if (res.data.text) speakWithBrowser(res.data.text);
+          if (res.data.text) {
+            speakWithBrowser(res.data.text);
+          }
         };
         audioRef.current.play().catch(() => {
-          if (res.data.text) speakWithBrowser(res.data.text);
+          if (res.data.text) {
+            speakWithBrowser(res.data.text);
+          }
         });
       } else if (res.data.text) {
         speakWithBrowser(res.data.text);
       }
-    } catch (err) {
-      console.error('播放失败', err);
-      const item = todayStatus?.items?.find(i => i.reminder_id === reminderId);
+    } catch (error) {
+      console.error('播放提醒音频失败:', error);
+      const item = todayStatus?.items?.find((entry) => entry.reminder_id === reminderId);
       if (item && 'speechSynthesis' in window) {
-        const text = `吃药提醒：请在${item.reminder_time}服用${item.drug_name || '药品'}，${item.dosage || '按说明书服用'}`;
+        const text = `吃药提醒：请在${item.reminder_time}服用${item.drug_name || '药品'}，${item.dosage || '按说明书服用'}。`;
         speakWithBrowser(text);
       }
     }
   };
 
-  const getMealText = (meal) => {
-    const map = { before_meal: '饭前', after_meal: '饭后', empty_stomach: '空腹', before_sleep: '睡前' };
-    return map[meal] || '';
-  };
-
   const getStatusBadge = (status) => {
     switch (status) {
       case 'taken':
-        return <span className="flex items-center gap-1 text-green-600 font-bold text-elder-base"><CheckCircle className="w-7 h-7" />已服药</span>;
+        return (
+          <span className="flex items-center gap-1 text-green-600 font-bold text-elder-base">
+            <CheckCircle className="w-7 h-7" />
+            已服药
+          </span>
+        );
       case 'late':
-        return <span className="flex items-center gap-1 text-yellow-600 font-bold text-elder-base"><Clock className="w-7 h-7" />迟服</span>;
+        return (
+          <span className="flex items-center gap-1 text-yellow-600 font-bold text-elder-base">
+            <Clock className="w-7 h-7" />
+            迟服
+          </span>
+        );
       case 'missed':
-        return <span className="flex items-center gap-1 text-red-600 font-bold text-elder-base"><AlertTriangle className="w-7 h-7" />漏服</span>;
+        return (
+          <span className="flex items-center gap-1 text-red-600 font-bold text-elder-base">
+            <AlertTriangle className="w-7 h-7" />
+            漏服
+          </span>
+        );
       default:
-        return <span className="flex items-center gap-1 text-orange-500 font-bold text-elder-base"><Bell className="w-7 h-7" />待服药</span>;
+        return (
+          <span className="flex items-center gap-1 text-orange-500 font-bold text-elder-base">
+            <Bell className="w-7 h-7" />
+            待服药
+          </span>
+        );
     }
   };
 
@@ -91,17 +127,15 @@ export default function ElderlyHome() {
     <div className="space-y-4 sm:space-y-6">
       <audio ref={audioRef} className="hidden" />
 
-      {/* 问候语 */}
       <div className="card-elder bg-gradient-to-r from-orange-50 to-yellow-50 border-orange-200">
         <h1 className="text-2xl sm:text-elder-2xl font-bold text-gray-800">
           {user?.display_name}，您好！
         </h1>
         <p className="text-base sm:text-elder-base text-gray-600 mt-1">
-          今天记得按时吃药哦
+          今天记得按时吃药哦。
         </p>
       </div>
 
-      {/* 快捷操作 */}
       <div className="grid grid-cols-2 gap-3 sm:gap-4">
         <Link
           to="/recognize"
@@ -111,6 +145,7 @@ export default function ElderlyHome() {
           <span className="text-lg sm:text-elder-lg font-bold text-gray-800">拍照识药</span>
           <span className="text-sm sm:text-elder-sm text-gray-500 mt-1">拍药盒自动识别</span>
         </Link>
+
         <Link
           to="/reminders"
           className="card-elder flex flex-col items-center justify-center py-6 sm:py-8 hover:shadow-lg transition border-blue-200 hover:border-blue-400 active:scale-95"
@@ -121,14 +156,14 @@ export default function ElderlyHome() {
         </Link>
       </div>
 
-      {/* 今日服药概览 */}
       {loading ? (
-        <div className="card-elder text-center text-base sm:text-elder-base text-gray-500 py-8">加载中...</div>
+        <div className="card-elder text-center text-base sm:text-elder-base text-gray-500 py-8">
+          加载中...
+        </div>
       ) : todayStatus ? (
         <div className="space-y-3 sm:space-y-4">
           <h2 className="text-xl sm:text-elder-xl font-bold text-gray-800">今日服药</h2>
 
-          {/* 统计 */}
           <div className="grid grid-cols-3 gap-2 sm:gap-3">
             <div className="card-elder text-center border-green-200 !p-3 sm:!p-4">
               <div className="text-3xl sm:text-elder-2xl font-bold text-green-600">{todayStatus.taken}</div>
@@ -144,10 +179,9 @@ export default function ElderlyHome() {
             </div>
           </div>
 
-          {/* 提醒列表 */}
           {todayStatus.items.length === 0 ? (
             <div className="card-elder text-center text-base sm:text-elder-base text-gray-500 py-8">
-              今天还没有吃药提醒，可以先去拍照识药添加药品哦
+              今天还没有吃药提醒，可以先去拍照识药添加药品。
             </div>
           ) : (
             <div className="space-y-3">
@@ -156,9 +190,10 @@ export default function ElderlyHome() {
                   key={item.reminder_id}
                   className={`card-elder ${
                     item.status === 'pending' ? 'animate-pulse-remind border-orange-300' : ''
-                  } ${item.status === 'taken' ? 'border-green-200 bg-green-50/50' : ''}`}
+                  } ${item.status === 'taken' ? 'border-green-200 bg-green-50/50' : ''} ${
+                    item.status === 'late' ? 'border-yellow-200 bg-yellow-50/50' : ''
+                  } ${item.status === 'missed' ? 'border-red-200 bg-red-50/50' : ''}`}
                 >
-                  {/* 顶部信息行 */}
                   <div className="flex items-center gap-2 mb-2">
                     <span className="text-xl sm:text-elder-xl font-bold text-orange-600">
                       {item.reminder_time}
@@ -177,7 +212,6 @@ export default function ElderlyHome() {
                     </button>
                   </div>
 
-                  {/* 药品信息 */}
                   <div className="flex items-center gap-3 mb-2">
                     {item.drug_image && (
                       <img
@@ -187,12 +221,13 @@ export default function ElderlyHome() {
                       />
                     )}
                     <div className="flex-1 min-w-0">
-                      <div className="text-lg sm:text-elder-lg font-bold text-gray-800 truncate">{item.drug_name}</div>
+                      <div className="text-lg sm:text-elder-lg font-bold text-gray-800 truncate">
+                        {item.drug_name}
+                      </div>
                       <div className="text-base sm:text-elder-base text-gray-600">{item.dosage}</div>
                     </div>
                   </div>
 
-                  {/* 状态 + 操作按钮 */}
                   <div className="flex items-center justify-between gap-3">
                     <div>{getStatusBadge(item.status)}</div>
                     {item.status === 'pending' && (
@@ -202,9 +237,9 @@ export default function ElderlyHome() {
                         </span>
                         <button
                           onClick={() => setShowConfirmModal(item)}
-                          className="px-6 py-3 bg-orange-500 text-white font-bold rounded-2xl text-lg shadow-lg active:scale-95 transition whitespace-nowrap hover:bg-orange-600"
+                          className="btn-elder-warning"
                         >
-                          去确认服药
+                          确认服药
                         </button>
                       </div>
                     )}
@@ -228,6 +263,7 @@ export default function ElderlyHome() {
                 <X className="w-7 h-7" />
               </button>
             </div>
+
             <div className="text-center space-y-2">
               <div className="text-xl sm:text-elder-xl font-bold text-orange-600">{showConfirmModal.drug_name}</div>
               <div className="text-lg sm:text-elder-lg text-gray-600">{showConfirmModal.reminder_time}</div>
@@ -238,6 +274,7 @@ export default function ElderlyHome() {
                 </div>
               )}
             </div>
+
             <div className="grid grid-cols-2 gap-3">
               <button
                 onClick={() => setShowConfirmModal(null)}
