@@ -77,6 +77,24 @@ class Drug(Base):
     reminders = relationship("Reminder", back_populates="drug")
 
 
+class DrugCatalog(Base):
+    __tablename__ = "drug_catalog"
+
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String(200), nullable=False, index=True)
+    normalized_name = Column(String(200), nullable=False, unique=True, index=True)
+    category = Column(String(100), nullable=True)
+    specification = Column(String(200), nullable=True)
+    efficacy = Column(Text, nullable=True)
+    efficacy_simple = Column(Text, nullable=True)
+    usage_dosage = Column(Text, nullable=True)
+    usage_simple = Column(Text, nullable=True)
+    frequency = Column(String(100), nullable=True)
+    caution = Column(Text, nullable=True)
+    caution_simple = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
 class Reminder(Base):
     __tablename__ = "reminders"
 

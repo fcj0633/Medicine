@@ -42,6 +42,10 @@ export const authAPI = {
 
 // ========== Drugs ==========
 export const drugAPI = {
+  searchCatalog: (keyword, limit = 8) => api.get('/api/drugs/catalog/search', {
+    params: { keyword, limit },
+  }),
+  createFromCatalog: (data) => api.post('/api/drugs/catalog/add', data),
   recognize: (file) => {
     const formData = new FormData();
     formData.append('file', file);

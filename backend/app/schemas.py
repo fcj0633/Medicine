@@ -1,4 +1,4 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import Optional, List, Dict, Any
 from datetime import datetime
 
@@ -102,6 +102,28 @@ class DrugOut(BaseModel):
         from_attributes = True
 
 
+class DrugCatalogOut(BaseModel):
+    id: int
+    name: str
+    category: Optional[str] = None
+    specification: Optional[str] = None
+    efficacy: Optional[str] = None
+    efficacy_simple: Optional[str] = None
+    usage_dosage: Optional[str] = None
+    usage_simple: Optional[str] = None
+    frequency: Optional[str] = None
+    caution: Optional[str] = None
+    caution_simple: Optional[str] = None
+
+    class Config:
+        from_attributes = True
+
+
+class DrugCatalogCreate(BaseModel):
+    catalog_id: int
+    target_user_id: Optional[int] = None
+
+
 # ========== Reminder ==========
 class ReminderCreate(BaseModel):
     drug_id: int
@@ -170,6 +192,9 @@ class OCRResult(BaseModel):
     low_confidence: bool = False
     confidence_notice: Optional[str] = None
     ocr_meta: Optional[Dict[str, Any]] = None
+    catalog_match_name: Optional[str] = None
+    catalog_enriched: bool = False
+    catalog_enriched_fields: List[str] = Field(default_factory=list)
 
 
 # ========== Auto Reminder ==========
